@@ -52,8 +52,8 @@ public class MyBot {
                     logDebug("Ship " + ship.getId() + " is not docked (" + ship.getDockingStatus() + "), continuing!");
                 }
 
-                // Directive #1 - Thrust toward nearby unowned planets.
-                Move planetMove = shouldThrustTowardPlanet(gameInstance, shipMoveInstance, gameMap, ship);
+                // Directive #1 - Conditionally thrust toward nearby planets.
+                Move planetMove = conditionallyThrustTowardPlanet(gameInstance, shipMoveInstance, gameMap, ship);
                 if (planetMove != null) {
                     moveList.add(planetMove);
                     logDebug("Ship " + ship.getId() + " thrust toward unowned planet move has been issued.");
@@ -63,7 +63,7 @@ public class MyBot {
                 }
 
                 // Directive #2 - Search out enemy ships.
-                Move enemyShipMove = thrustTowardEnemyShip(shipMoveInstance, gameMap, ship);
+                Move enemyShipMove = thrustTowardEnemyShip(gameInstance, shipMoveInstance, gameMap, ship);
                 if (enemyShipMove != null) {
                     moveList.add(enemyShipMove);
                     logDebug("Ship " + ship.getId() + " thrust toward enemy ship move has been issued.");
@@ -79,37 +79,49 @@ public class MyBot {
         }
     }
 
-    static Move shouldThrustTowardPlanet(HaliteGameInstance gameInstance, HaliteShipMoveInstance shipMoveInstance, GameMap gameMap, Ship ship) {
+    static Move conditionallyThrustTowardPlanet(HaliteGameInstance gameInstance, HaliteShipMoveInstance shipMoveInstance, GameMap gameMap, Ship ship) {
 
-        final double PLANETS_OWNED_THRESHOLD = 0.6d;
-
-        if (gameInstance.percentageOfPlanetsOwned >= PLANETS_OWNED_THRESHOLD) {
+        if (gameInstance.percentageOfPlanetsOwned >= gameInstance.MIN_PLANETS_OWNED_THRESHOLD) {
             logDebug("Bypassing thrust toward any planets as % owned threshold of [" + gameInstance.percentageOfPlanetsOwned +
-                    "] is >= [" + PLANETS_OWNED_THRESHOLD + "]");
+                    "] is >= [" + gameInstance.MIN_PLANETS_OWNED_THRESHOLD + "]");
             return null;
         }
 
-        for (Map.Entry<Double,Planet> nearbyUnownedPlanetEntry : shipMoveInstance.nearbyUnownedPlanets.entrySet()) {
+        // TODO Intelligently order nearby planets.
+        // List<Planet> nearbyUnownedPlanetsByRadius = reorderNearbyPlanetsByRadius(shipMoveInstance.nearbyPlanets);
 
-            Planet planet = nearbyUnownedPlanetEntry.getValue();
+        for (Map.Entry<Double,Planet> nearbyPlanetEntry : shipMoveInstance.nearbyPlanets.entrySet()) {
 
+            Planet planet = nearbyPlanetEntry.getValue();
+
+            // If the planet is owned by me, and it is a preferred large planet, proceed/dock.
             if (planet.isOwned()) {
-                continue;
-            }
+                if (planet.getOwner() == gameInstance.myPlayerId) {
+                    double dockedShipPercentage = (double)planet.getDockedShips().size() / (double)planet.getDockingSpots();
+                    if (dockedShipPercentage >= gameInstance.MAX_PLANET_DOCK_PERCENTAGE) {
+                        logDebug("Reached maximum docked ship percentage [" + dockedShipPercentage + "]");
+                        continue; // Break out - threshold reached for % of dock slots occupied.
+                    }
+                } else { // Enemy owned; proceed to next planet inspection.
+                    continue;
+                }
+            } // Unowned, continue.
 
             if (ship.canDock(planet)) {
                 logDebug("Ship " + ship.getId() + "/" + ship.getOwner() + " DOCKING on unowned Planet " + planet.toString());
                 return new DockMove(ship, planet);
             }
 
+            /*
             if (gameInstance.isShipAlreadyThrustingToPlanet(planet.getId())) {
                 logDebug("Ship is already thrusting to planet [" + planet.getId() + "], bypassing.");
                 continue;
             }
+            */
 
             final ThrustMove newThrustMove = Navigation.navigateShipToDock(gameMap, ship, planet, Constants.MAX_SPEED);
             if (newThrustMove != null) {
-                logDebug("Ship " + ship.getId() + "/" + ship.getOwner() + " THRUSTING for unowned Planet " + planet.toString());
+                logDebug("Ship " + ship.getId() + "/" + ship.getOwner() + " THRUSTING for Planet " + planet.toString());
                 gameInstance.registerShipThrustingToPlanet(planet.getId());
                 return newThrustMove;
             }
@@ -120,14 +132,9 @@ public class MyBot {
         return null;
     }
 
-    private static double getHypotenuse(double height, double width) {
-        return Math.sqrt((height * height) + (width * width));
-    }
-
-    static Move thrustTowardEnemyShip(HaliteShipMoveInstance shipMoveInstance, GameMap gameMap, Ship ship) {
+    static Move thrustTowardEnemyShip(HaliteGameInstance gameInstance, HaliteShipMoveInstance shipMoveInstance, GameMap gameMap, Ship ship) {
 
         final double MIN_ATTACK_RANGE = 4.0d;
-        final double MAX_ATTACK_DOCKED_SHIP_RANGE = 0.5d * getHypotenuse(gameMap.getHeight(), gameMap.getWidth());
 
         /*logDebug("Calculated max attack dock ship range at " + MAX_ATTACK_DOCKED_SHIP_RANGE +
             " from map height of " + gameMap.getHeight() + " and map width of " + gameMap.getWidth());*/
@@ -138,7 +145,8 @@ public class MyBot {
             Ship dockedEnemyShip = nearbyDockedEnemyShipEntry.getValue();
             double dockedEnemyShipDistance = nearbyDockedEnemyShipEntry.getKey();
 
-            if (dockedEnemyShipDistance > MAX_ATTACK_DOCKED_SHIP_RANGE) { continue; }
+            // Do not select this enemy ship if it's beyond the maximum attack range.
+            if (dockedEnemyShipDistance > gameInstance.MAX_ATTACK_DOCKED_SHIP_RANGE) { continue; }
 
             Position dockedEnemyShipPosition = new Position(dockedEnemyShip.getXPos(), dockedEnemyShip.getYPos());
 
@@ -179,7 +187,26 @@ public class MyBot {
         return null;
     }
 
-    static void logMapData(Map<Double,Ship> myNearbyShips, Map<Double,Ship> enemyNearbyShips, Map<Double,Planet> nearbyOwnedPlanets) {
+    /*
+    private static List<Planet> reorderNearbyPlanetsByRadius(Map<Double,Planet> planetMap) {
+
+        List<Planet> sortedPlanets = new ArrayList<>();
+
+        for (Map.Entry<Double,Planet> nearbyUnownedPlanetEntry : planetMap.entrySet()) {
+            sortedPlanets.add(nearbyUnownedPlanetEntry.getValue());
+        }
+        Collections.sort(sortedPlanets, new Comparator<Planet>() {
+            @Override
+            public int compare(Planet p1, Planet p2) {
+                return Double.compare(p2.getRadius(), p1.getRadius());
+            }
+        });
+
+        return sortedPlanets;
+    }
+    */
+
+    private static void logMapData(Map<Double,Ship> myNearbyShips, Map<Double,Ship> enemyNearbyShips, Map<Double,Planet> nearbyOwnedPlanets) {
 
         if (!DEBUG_LOGGING) { return; }
 
@@ -195,7 +222,7 @@ public class MyBot {
         }
     }
 
-    static void logDebug(String statement) {
+    private static void logDebug(String statement) {
 
         if (!DEBUG_LOGGING) { return; }
 
@@ -218,6 +245,10 @@ public class MyBot {
 
         List<Integer> thrustingToPlanets;
 
+        double MAX_ATTACK_DOCKED_SHIP_RANGE = 0.0d; // Maximum travel distance allowed to attack a docked enemy ship
+        double MIN_PLANETS_OWNED_THRESHOLD = 0.6d; // Minimum percent of planets owned before prioritizing ship attacks
+        double MAX_PLANET_DOCK_PERCENTAGE = 0.75d; // Maximum percent of ships docked on a planet
+
         HaliteGameInstance(int playerId) {
             myPlayerId = playerId;
             myShipCount = 0;
@@ -229,6 +260,11 @@ public class MyBot {
             percentageOfShipsOwned = 0.0d;
             myPlanets = new TreeMap<>();
             thrustingToPlanets = new ArrayList<>();
+
+            // Constants
+            MIN_PLANETS_OWNED_THRESHOLD = 0.6d;
+            MAX_ATTACK_DOCKED_SHIP_RANGE = 0.0d;
+            MAX_PLANET_DOCK_PERCENTAGE = 0.6d;
         }
 
         void synchronize(GameMap gameMap) {
@@ -259,6 +295,8 @@ public class MyBot {
             } else {
                 percentageOfShipsOwned = 0.0d;
             }
+
+            MAX_ATTACK_DOCKED_SHIP_RANGE = 0.5d * getHypotenuse(gameMap.getHeight(), gameMap.getWidth());
         }
 
         void registerShipThrustingToPlanet(Integer planetId) {
@@ -267,6 +305,10 @@ public class MyBot {
 
         boolean isShipAlreadyThrustingToPlanet(Integer planetId) {
             return thrustingToPlanets.contains(planetId);
+        }
+
+        double getHypotenuse(double height, double width) {
+            return Math.sqrt((height * height) + (width * width));
         }
 
         String echoStatistics() {
@@ -285,6 +327,7 @@ public class MyBot {
         Map<Double,Ship> undockedEnemyShips;
         Map<Double,Ship> dockedEnemyShips;
 
+        Map<Double,Planet> nearbyPlanets;
         Map<Double,Planet> nearbyOwnedPlanets;
         Map<Double,Planet> nearbyUnownedPlanets;
         Map<Double,Planet> nearbyEnemyOwnedPlanets;
@@ -296,6 +339,7 @@ public class MyBot {
             undockedEnemyShips = new TreeMap<>();
             allMyShips = new TreeMap<>();
             nearbyEnemyShips = new TreeMap<>();
+            nearbyPlanets = new TreeMap<>();
             nearbyOwnedPlanets = new TreeMap<>();
             nearbyUnownedPlanets = new TreeMap<>();
             nearbyEnemyOwnedPlanets = new TreeMap<>();
@@ -314,6 +358,7 @@ public class MyBot {
                 }
                 if (entry.getValue() instanceof Planet) {
                     Planet thisPlanet = (Planet) entry.getValue();
+                    nearbyPlanets.put(entry.getKey(), thisPlanet);
                     if (thisPlanet.isOwned()) {
                         if (thisPlanet.getOwner() == myPlayerId) {
                             nearbyOwnedPlanets.put(entry.getKey(), (Planet) entry.getValue());
