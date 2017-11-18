@@ -1,6 +1,10 @@
 Releases:
 
-V7
+V9
+==============
+- When searching for nearby planets, if it's enemy-owned, attack the docked ship before searching for a new planet.
+
+V7-V8
 ==============
 - Dock more than one ship on a planet (with a threshold 75%)
 

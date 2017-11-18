@@ -53,17 +53,17 @@ public class MyBot {
                 }
 
                 // Directive #1 - Conditionally thrust toward nearby planets.
-                Move planetMove = conditionallyThrustTowardPlanet(gameInstance, shipMoveInstance, gameMap, ship);
-                if (planetMove != null) {
-                    moveList.add(planetMove);
-                    logDebug("Ship " + ship.getId() + " thrust toward unowned planet move has been issued.");
+                Move thrustMove = conditionallyThrustTowardPlanet(gameInstance, shipMoveInstance, gameMap, ship);
+                if (thrustMove != null) {
+                    moveList.add(thrustMove);
+                    logDebug("Ship " + ship.getId() + " thrust toward planet or other target has been issued.");
                     continue; // Next ship in armada
                 } else {
                     logDebug("No ship commands issued, searching for enemy ships.");
                 }
 
                 // Directive #2 - Search out enemy ships.
-                Move enemyShipMove = thrustTowardEnemyShip(gameInstance, shipMoveInstance, gameMap, ship);
+                Move enemyShipMove = thrustTowardEnemyShips(gameInstance, shipMoveInstance, gameMap, ship);
                 if (enemyShipMove != null) {
                     moveList.add(enemyShipMove);
                     logDebug("Ship " + ship.getId() + " thrust toward enemy ship move has been issued.");
@@ -99,11 +99,25 @@ public class MyBot {
                 if (planet.getOwner() == gameInstance.myPlayerId) {
                     double dockedShipPercentage = (double)planet.getDockedShips().size() / (double)planet.getDockingSpots();
                     if (dockedShipPercentage >= gameInstance.MAX_PLANET_DOCK_PERCENTAGE) {
-                        logDebug("Reached maximum docked ship percentage [" + dockedShipPercentage + "]");
                         continue; // Break out - threshold reached for % of dock slots occupied.
                     }
-                } else { // Enemy owned; proceed to next planet inspection.
-                    continue;
+                } else {
+                    // Planet is enemy owned - initiate a "swarm" attack on any docked enemy ship(s) (first ship found).
+                    List<Integer> dockedEnemyShips = planet.getDockedShips();
+                    for (Integer enemyShipId : dockedEnemyShips) {
+                        Ship dockedEnemyShip = gameMap.getShip(planet.getOwner(), enemyShipId);
+                        Position dockedEnemyShipPosition = new Position(dockedEnemyShip.getXPos(), dockedEnemyShip.getYPos());
+                        Position myPosition = new Position(ship.getXPos(), ship.getYPos());
+                        Double distanceToDockedEnemyShip = myPosition.getDistanceTo(dockedEnemyShipPosition);
+                        ThrustMove thrustMove = thrustWithShipTowardTargetPosition(ship, dockedEnemyShipPosition, distanceToDockedEnemyShip, gameMap);
+                        if (thrustMove != null) {
+                            logDebug("Ship [" + ship.getId() + "] found enemy ship [" + dockedEnemyShip.getId() + "] docked on nearby planet [" + planet.getId() + "], engaging!");
+                            return thrustMove;
+                        } else {
+                            logDebug("Could not thrust toward nearby docked enemy ship [" + dockedEnemyShip.getId() + "] for some damn reason!");
+                        }
+                    }
+
                 }
             } // Unowned, continue.
 
@@ -112,17 +126,9 @@ public class MyBot {
                 return new DockMove(ship, planet);
             }
 
-            /*
-            if (gameInstance.isShipAlreadyThrustingToPlanet(planet.getId())) {
-                logDebug("Ship is already thrusting to planet [" + planet.getId() + "], bypassing.");
-                continue;
-            }
-            */
-
             final ThrustMove newThrustMove = Navigation.navigateShipToDock(gameMap, ship, planet, Constants.MAX_SPEED);
             if (newThrustMove != null) {
                 logDebug("Ship " + ship.getId() + "/" + ship.getOwner() + " THRUSTING for Planet " + planet.toString());
-                gameInstance.registerShipThrustingToPlanet(planet.getId());
                 return newThrustMove;
             }
 
@@ -132,7 +138,7 @@ public class MyBot {
         return null;
     }
 
-    static Move thrustTowardEnemyShip(HaliteGameInstance gameInstance, HaliteShipMoveInstance shipMoveInstance, GameMap gameMap, Ship ship) {
+    static Move thrustTowardEnemyShips(HaliteGameInstance gameInstance, HaliteShipMoveInstance shipMoveInstance, GameMap gameMap, Ship ship) {
 
         final double MIN_ATTACK_RANGE = 4.0d;
 
@@ -144,20 +150,11 @@ public class MyBot {
 
             Ship dockedEnemyShip = nearbyDockedEnemyShipEntry.getValue();
             double dockedEnemyShipDistance = nearbyDockedEnemyShipEntry.getKey();
-
-            // Do not select this enemy ship if it's beyond the maximum attack range.
-            if (dockedEnemyShipDistance > gameInstance.MAX_ATTACK_DOCKED_SHIP_RANGE) { continue; }
-
             Position dockedEnemyShipPosition = new Position(dockedEnemyShip.getXPos(), dockedEnemyShip.getYPos());
 
-            final ThrustMove thrustTowardDockedEnemyShipMove = Navigation.navigateShipTowardsTarget(
-                    gameMap, ship, dockedEnemyShipPosition, Constants.MAX_SPEED, true,
-                    Constants.MAX_NAVIGATION_CORRECTIONS, Math.PI / 365.0);
-            if (thrustTowardDockedEnemyShipMove != null) {
-                logDebug("Adding move to moveList: " + thrustTowardDockedEnemyShipMove.toString());
-                return thrustTowardDockedEnemyShipMove;
-            } else {
-                logDebug("Could not thrust toward enemy ship for some damn reason!");
+            ThrustMove thrustMove = thrustWithShipTowardTargetPosition(ship, dockedEnemyShipPosition, dockedEnemyShipDistance, gameMap);
+            if (thrustMove != null) {
+                return thrustMove;
             }
         }
 
@@ -167,21 +164,32 @@ public class MyBot {
             Ship enemyShip = nearbyEnemyShipEntry.getValue();
             double enemyShipDistance = nearbyEnemyShipEntry.getKey();
 
-            // Don't thrust toward ship if we're already in attack range.
-            if (enemyShipDistance <= MIN_ATTACK_RANGE) { continue; }
-
+            if (enemyShipDistance <= MIN_ATTACK_RANGE) { continue; } // Don't thrust toward ship if we're already in attack range.
             Position enemyShipPosition = new Position(enemyShip.getXPos(), enemyShip.getYPos());
-
-            final ThrustMove thrustTowardEnemyShipMove = Navigation.navigateShipTowardsTarget(
-                    gameMap, ship, enemyShipPosition, Constants.MAX_SPEED, true,
-                    Constants.MAX_NAVIGATION_CORRECTIONS, Math.PI / 365.0);
-            if (thrustTowardEnemyShipMove != null) {
-                logDebug("Adding move to moveList: " + thrustTowardEnemyShipMove.toString());
-                return thrustTowardEnemyShipMove;
-            } else {
-                logDebug("Could not thrust toward enemy ship for some damn reason!");
+            ThrustMove thrustMove = thrustWithShipTowardTargetPosition(ship, enemyShipPosition, enemyShipDistance, gameMap);
+            if (thrustMove != null) {
+                return thrustMove;
             }
+        }
 
+        return null;
+    }
+
+    private static ThrustMove thrustWithShipTowardTargetPosition(Ship ship, Position targetPosition, Double targetDistance, GameMap gameMap) {
+
+        // Do not thrust toward this ship if it's beyond the maximum attack range.
+        if (targetDistance > gameInstance.MAX_ATTACK_DOCKED_SHIP_RANGE) { return null; }
+
+        // Position targetPosition = new Position(ship.getXPos(), ship.getYPos());
+
+        final ThrustMove thrustTowardShipMove = Navigation.navigateShipTowardsTarget(
+                gameMap, ship, targetPosition, Constants.MAX_SPEED, true,
+                Constants.MAX_NAVIGATION_CORRECTIONS, Math.PI / 365.0);
+        if (thrustTowardShipMove != null) {
+            logDebug("Adding move to moveList: " + thrustTowardShipMove.toString());
+            return thrustTowardShipMove;
+        } else {
+            logDebug("Could not thrust toward ship for some damn reason!");
         }
 
         return null;
@@ -243,8 +251,6 @@ public class MyBot {
         Map<Integer,Planet> myPlanets;
         double percentageOfPlanetsOwned = 0.0d;
 
-        List<Integer> thrustingToPlanets;
-
         double MAX_ATTACK_DOCKED_SHIP_RANGE = 0.0d; // Maximum travel distance allowed to attack a docked enemy ship
         double MIN_PLANETS_OWNED_THRESHOLD = 0.6d; // Minimum percent of planets owned before prioritizing ship attacks
         double MAX_PLANET_DOCK_PERCENTAGE = 0.75d; // Maximum percent of ships docked on a planet
@@ -259,7 +265,6 @@ public class MyBot {
             percentageOfPlanetsOwned = 0.0d;
             percentageOfShipsOwned = 0.0d;
             myPlanets = new TreeMap<>();
-            thrustingToPlanets = new ArrayList<>();
 
             // Constants
             MIN_PLANETS_OWNED_THRESHOLD = 0.6d;
@@ -268,8 +273,6 @@ public class MyBot {
         }
 
         void synchronize(GameMap gameMap) {
-
-            thrustingToPlanets.clear();
 
             myShipCount = gameMap.getMyPlayer().getShips().size();
             totalPlanetCount = gameMap.getAllPlanets().size();
@@ -297,14 +300,6 @@ public class MyBot {
             }
 
             MAX_ATTACK_DOCKED_SHIP_RANGE = 0.5d * getHypotenuse(gameMap.getHeight(), gameMap.getWidth());
-        }
-
-        void registerShipThrustingToPlanet(Integer planetId) {
-            thrustingToPlanets.add(planetId);
-        }
-
-        boolean isShipAlreadyThrustingToPlanet(Integer planetId) {
-            return thrustingToPlanets.contains(planetId);
         }
 
         double getHypotenuse(double height, double width) {
